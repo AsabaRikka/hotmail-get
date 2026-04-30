@@ -392,6 +392,131 @@ class LovartGUIFetcher:
         
         return None
 
+    def get_code_by_keyword(self, keyword: str, email: Optional[str] = None) -> Optional[str]:
+        """根据关键字查找最新的验证码
+        
+        Args:
+            keyword: 要查找的关键字 (如 'lovart', 'Trae')
+            email: 可选，指定只在某个邮箱账号中查找
+        
+        Returns:
+            最新的验证码
+        """
+        try:
+            # 如果指定了邮箱，先找到该邮箱并点击查看
+            if email:
+                self.log(f"正在定位邮箱: {email}")
+                rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+                target_row = None
+                for row in rows:
+                    if email.lower() in row.text.lower():
+                        target_row = row
+                        break
+                
+                if not target_row:
+                    self.log(f"未找到邮箱: {email}")
+                    return None
+                
+                # 点击查看按钮
+                self._click_view_button(target_row)
+                time.sleep(3)
+            
+            self.log(f"正在查找包含关键字 '{keyword}' 的最新邮件...")
+            
+            # 查找所有邮件项，找到包含关键字的
+            code = self._extract_code_by_keyword(keyword)
+            
+            if code:
+                self.log(f"成功找到验证码: {code} (关键字: {keyword})")
+                return code
+            else:
+                self.log(f"未找到包含关键字 '{keyword}' 的验证码邮件")
+                
+        except Exception as e:
+            self.log(f"根据关键字查找验证码失败: {e}")
+            
+        return None
+
+    def _click_view_button(self, row_element):
+        """点击行的查看按钮"""
+        try:
+            view_btn = None
+            cells = row_element.find_elements(By.TAG_NAME, "td")
+            if cells:
+                for cell in cells:
+                    try:
+                        btns = cell.find_elements(By.TAG_NAME, "button")
+                        for b in btns:
+                            if "查看" in b.text or "view" in b.text.lower():
+                                view_btn = b
+                                break
+                        if not view_btn and btns:
+                            view_btn = btns[0]
+                        if view_btn:
+                            break
+                    except:
+                        pass
+            
+            if not view_btn:
+                try:
+                    view_btn = row_element.find_element(By.XPATH, ".//button[contains(text(), '查看')]")
+                except:
+                    pass
+            
+            if view_btn:
+                self.driver.execute_script("arguments[0].scrollIntoView();", view_btn)
+                self.driver.execute_script("arguments[0].click();", view_btn)
+        except Exception as e:
+            self.log(f"点击查看按钮失败: {e}")
+
+    def _extract_code_by_keyword(self, keyword: str) -> Optional[str]:
+        """在邮件列表或详情中根据关键字提取验证码"""
+        try:
+            time.sleep(2)
+            
+            # 遍历邮件列表，找到最新的（通常在最上面）包含关键字的
+            email_items = self.driver.find_elements(By.CSS_SELECTOR, "div[class*='cursor-pointer'], tr, li")
+            
+            target_item = None
+            for item in email_items:
+                try:
+                    text = item.text.lower()
+                    if keyword.lower() in text:
+                        target_item = item
+                        break
+                except:
+                    continue
+            
+            if not target_item:
+                # 如果列表没找到，尝试扫描全页文本
+                page_text = self.driver.page_source
+                if keyword.lower() in page_text.lower():
+                    # 直接尝试正则提取
+                    matches = re.findall(r'\b(\d{6})\b', page_text)
+                    if matches:
+                        return matches[-1] # 返回最后一个，通常是最新的
+                return None
+            
+            # 找到目标邮件，点击打开
+            self.driver.execute_script("arguments[0].scrollIntoView();", target_item)
+            self.driver.execute_script("arguments[0].click();", target_item)
+            time.sleep(3)
+            
+            # 在详情中提取验证码
+            detail_page = self.driver.page_source
+            # 查找 6 位数字
+            code_match = re.search(r'>(\d{6})<', detail_page)
+            if not code_match:
+                code_match = re.search(r'\b(\d{6})\b', self.driver.find_element(By.TAG_NAME, "body").text)
+            
+            if code_match:
+                return code_match.group(1)
+                
+        except Exception as e:
+            self.log(f"提取验证码失败: {e}")
+            
+        return None
+
     def get_account_by_row(self, row_index: int) -> Optional[str]:
         """根据行号获取邮箱账号 (从1开始)"""
         try:
@@ -679,6 +804,20 @@ class LovartGUIApp:
                                     font=("微软雅黑", 10), bg="#673AB7", fg="white",
                                     activebackground="#512DA8")
         self.get_row_btn.pack(side=tk.LEFT, padx=10)
+
+        # 关键字查询区域
+        keyword_query_frame = tk.Frame(self.root, bg="#f5f5f5")
+        keyword_query_frame.pack(fill=tk.X, pady=5, padx=30)
+        
+        tk.Label(keyword_query_frame, text="关键字查询验证码:", font=("微软雅黑", 10), bg="#f5f5f5").pack(side=tk.LEFT, padx=(10, 5))
+        self.keyword_entry = tk.Entry(keyword_query_frame, font=("微软雅黑", 10), width=15)
+        self.keyword_entry.pack(side=tk.LEFT, padx=5)
+        self.keyword_entry.insert(0, "lovart") # 默认关键字
+
+        self.get_keyword_btn = tk.Button(keyword_query_frame, text="根据关键字查找", command=self.get_code_by_keyword_action,
+                                        font=("微软雅黑", 10), bg="#009688", fg="white",
+                                        activebackground="#00796B")
+        self.get_keyword_btn.pack(side=tk.LEFT, padx=10)
         
         # 状态显示
         status_frame = tk.Frame(self.root)
@@ -880,6 +1019,49 @@ class LovartGUIApp:
         
         threading.Thread(target=run, daemon=True).start()
 
+    def get_code_by_keyword_action(self):
+        """根据关键字获取验证码的操作"""
+        keyword = self.keyword_entry.get().strip()
+        if not keyword:
+            messagebox.showwarning("警告", "请输入要查找的关键字 (如 'lovart', 'Trae')")
+            return
+            
+        self.set_buttons_state(False)
+        self.log(f"正在根据关键字 '{keyword}' 查找最新验证码...")
+        
+        def run():
+            try:
+                if not self.fetcher or not self.fetcher.driver:
+                    self.fetcher = LovartGUIFetcher(log_func=self.log)
+                    self.fetcher.start(headless=self.headless_var.get())
+                
+                # 检查是否在账号输入框中指定了邮箱
+                account_text = self.account_entry.get().strip()
+                email = None
+                if account_text and "@" in account_text:
+                    email = account_text.split('----')[0].strip()
+                
+                code = self.fetcher.get_code_by_keyword(keyword, email)
+                
+                if code:
+                    self.code_entry.delete(0, tk.END)
+                    self.code_entry.insert(0, code)
+                    self.log(f"成功找到验证码: {code}")
+                    
+                    # 自动复制
+                    self.copy_to_clipboard(code)
+                    self.log("验证码已复制到剪贴板!")
+                    self.root.after(0, lambda: messagebox.showinfo("成功", f"成功找到验证码:\n{code}\n\n(已自动复制到剪贴板)"))
+                else:
+                    self.log(f"未找到包含关键字 '{keyword}' 的验证码")
+                    self.root.after(0, lambda: messagebox.showwarning("失败", f"未找到包含关键字 '{keyword}' 的验证码邮件"))
+            except Exception as e:
+                self.log(f"根据关键字查询失败: {str(e)}")
+            finally:
+                self.root.after(0, lambda: self.set_buttons_state(True))
+        
+        threading.Thread(target=run, daemon=True).start()
+
     def get_all_codes(self):
         """获取所有账号的验证码"""
         self.set_buttons_state(False)
@@ -960,6 +1142,8 @@ class LovartGUIApp:
         self.get_all_btn.config(state=state)
         if hasattr(self, 'get_row_btn'):
             self.get_row_btn.config(state=state)
+        if hasattr(self, 'get_keyword_btn'):
+            self.get_keyword_btn.config(state=state)
         self.root.update()
 
 

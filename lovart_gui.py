@@ -392,6 +392,46 @@ class LovartGUIFetcher:
         
         return None
 
+    def get_account_by_row(self, row_index: int) -> Optional[str]:
+        """根据行号获取邮箱账号 (从1开始)"""
+        try:
+            # 等待页面加载
+            time.sleep(2)
+            
+            # 获取所有账号行
+            rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+            if row_index < 1 or row_index > len(rows):
+                self.log(f"行号错误: 输入 {row_index}, 实际共有 {len(rows)} 行")
+                return None
+            
+            target_row = rows[row_index - 1]
+            cells = target_row.find_elements(By.TAG_NAME, "td")
+            
+            email = ""
+            # 尝试从单元格中寻找邮箱
+            for cell in cells:
+                cell_text = cell.text.strip()
+                if "@" in cell_text and "." in cell_text and len(cell_text) > 5:
+                    email = cell_text
+                    break
+            
+            if not email:
+                # 正则兜底
+                match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', target_row.text)
+                if match:
+                    email = match.group(0)
+            
+            if email:
+                self.log(f"成功获取第 {row_index} 行账号: {email}")
+                return email
+            else:
+                self.log(f"第 {row_index} 行未发现有效邮箱地址")
+                
+        except Exception as e:
+            self.log(f"根据行号获取账号失败: {e}")
+            
+        return None
+
     def save_screenshot(self, name: str):
         """保存诊断截图到 debug 文件夹"""
         try:
@@ -585,7 +625,13 @@ class LovartGUIApp:
         quick_frame = tk.Frame(self.root)
         quick_frame.pack(pady=5)
         
-        tk.Label(quick_frame, text="快捷输入:", font=("微软雅黑", 10)).pack(side=tk.LEFT)
+        # 浏览器模式开关
+        self.headless_var = tk.BooleanVar(value=True) # 默认开启静默模式
+        self.headless_check = tk.Checkbutton(quick_frame, text="静默运行浏览器 (不显示窗口)", 
+                                           variable=self.headless_var, font=("微软雅黑", 10))
+        self.headless_check.pack(side=tk.LEFT, padx=10)
+
+        tk.Label(quick_frame, text="快捷输入:", font=("微软雅黑", 10)).pack(side=tk.LEFT, padx=(20, 5))
         
         quick_btn = tk.Button(quick_frame, text="粘贴示例账号", command=self.paste_sample,
                              font=("微软雅黑", 9), width=15)
@@ -619,6 +665,20 @@ class LovartGUIApp:
                                     font=("微软雅黑", 12), width=10, bg="#FF9800", fg="white",
                                     activebackground="#F57C00", pady=8)
         self.get_all_btn.pack(side=tk.LEFT, padx=5)
+
+        # 行号查询区域
+        row_query_frame = tk.Frame(self.root, bg="#f5f5f5")
+        row_query_frame.pack(fill=tk.X, pady=5, padx=30)
+        
+        tk.Label(row_query_frame, text="输入行号查询:", font=("微软雅黑", 10), bg="#f5f5f5").pack(side=tk.LEFT, padx=(10, 5))
+        self.row_entry = tk.Entry(row_query_frame, font=("微软雅黑", 10), width=8)
+        self.row_entry.pack(side=tk.LEFT, padx=5)
+        self.row_entry.insert(0, "1") # 默认第1行
+
+        self.get_row_btn = tk.Button(row_query_frame, text="按行号获取账号", command=self.get_account_by_row_action,
+                                    font=("微软雅黑", 10), bg="#673AB7", fg="white",
+                                    activebackground="#512DA8")
+        self.get_row_btn.pack(side=tk.LEFT, padx=10)
         
         # 状态显示
         status_frame = tk.Frame(self.root)
@@ -680,7 +740,7 @@ class LovartGUIApp:
             try:
                 if not self.fetcher or not self.fetcher.driver:
                     self.fetcher = LovartGUIFetcher(log_func=self.log)
-                    self.fetcher.start(headless=True)
+                    self.fetcher.start(headless=self.headless_var.get())
                 
                 self.log("正在导入账号...")
                 if self.fetcher.import_account(account_text):
@@ -722,7 +782,7 @@ class LovartGUIApp:
                 
                 if need_start:
                     self.fetcher = LovartGUIFetcher(log_func=self.log)
-                    self.fetcher.start(headless=True)
+                    self.fetcher.start(headless=self.headless_var.get())
                 
                 # 如果提供了完整信息，则尝试自动导入
                 if is_full_info:
@@ -764,7 +824,7 @@ class LovartGUIApp:
                 if not self.fetcher or not self.fetcher.driver:
                     self.log("正在启动浏览器...")
                     self.fetcher = LovartGUIFetcher(log_func=self.log)
-                    self.fetcher.start(headless=False)
+                    self.fetcher.start(headless=self.headless_var.get())
                 
                 accounts = self.fetcher.get_imported_accounts()
                 
@@ -784,6 +844,42 @@ class LovartGUIApp:
         
         threading.Thread(target=run, daemon=True).start()
 
+    def get_account_by_row_action(self):
+        """按行号获取账号的操作"""
+        row_str = self.row_entry.get().strip()
+        if not row_str or not row_str.isdigit():
+            messagebox.showwarning("警告", "请输入有效的数字行号")
+            return
+            
+        row_index = int(row_str)
+        self.set_buttons_state(False)
+        self.log(f"正在查询第 {row_index} 行的账号...")
+        
+        def run():
+            try:
+                if not self.fetcher or not self.fetcher.driver:
+                    self.fetcher = LovartGUIFetcher(log_func=self.log)
+                    self.fetcher.start(headless=self.headless_var.get())
+                
+                email = self.fetcher.get_account_by_row(row_index)
+                
+                if email:
+                    self.log(f"第 {row_index} 行账号为: {email}")
+                    # 自动填充到账号输入框，方便后续获取验证码
+                    self.account_entry.delete(0, tk.END)
+                    self.account_entry.insert(0, email)
+                    self.log("账号已填充到上方输入框")
+                    self.root.after(0, lambda: messagebox.showinfo("成功", f"成功获取第 {row_index} 行账号:\n{email}"))
+                else:
+                    self.log(f"未能获取到第 {row_index} 行账号")
+                    self.root.after(0, lambda: messagebox.showwarning("失败", f"未能获取到第 {row_index} 行账号，请检查行号是否正确"))
+            except Exception as e:
+                self.log(f"按行号查询失败: {str(e)}")
+            finally:
+                self.root.after(0, lambda: self.set_buttons_state(True))
+        
+        threading.Thread(target=run, daemon=True).start()
+
     def get_all_codes(self):
         """获取所有账号的验证码"""
         self.set_buttons_state(False)
@@ -793,7 +889,7 @@ class LovartGUIApp:
             try:
                 if not self.fetcher or not self.fetcher.driver:
                     self.fetcher = LovartGUIFetcher(log_func=self.log)
-                    self.fetcher.start(headless=False)
+                    self.fetcher.start(headless=self.headless_var.get())
                 
                 self.log("正在批量处理所有账号...")
                 codes = self.fetcher.get_all_lovart_codes()
@@ -862,6 +958,8 @@ class LovartGUIApp:
         self.get_code_btn.config(state=state)
         self.get_accounts_btn.config(state=state)
         self.get_all_btn.config(state=state)
+        if hasattr(self, 'get_row_btn'):
+            self.get_row_btn.config(state=state)
         self.root.update()
 
 

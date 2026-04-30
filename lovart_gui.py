@@ -56,6 +56,11 @@ class LovartGUIFetcher:
         self.user_data_dir = os.path.join(os.getcwd(), "chrome_profile")
         if not os.path.exists(self.user_data_dir):
             os.makedirs(self.user_data_dir)
+            
+        # 设置调试图片目录
+        self.debug_dir = os.path.join(os.getcwd(), "debug_logs")
+        if not os.path.exists(self.debug_dir):
+            os.makedirs(self.debug_dir)
     
     def start(self, headless: bool = False):
         """启动浏览器"""
@@ -64,7 +69,9 @@ class LovartGUIFetcher:
         
         options = Options()
         if headless:
-            options.add_argument('--headless')
+            options.add_argument('--headless=new')  # 使用新的 headless 模式更稳定
+            options.add_argument('--disable-gpu')
+            options.add_argument('--window-size=1920,1080') # headless 模式下设置大分辨率
         
         # 使用持久化配置目录
         options.add_argument(f'--user-data-dir={self.user_data_dir}')
@@ -289,14 +296,15 @@ class LovartGUIFetcher:
         return None
 
     def save_screenshot(self, name: str):
-        """保存诊断截图"""
+        """保存诊断截图到 debug 文件夹"""
         try:
             if self.driver:
                 filename = f"debug_{name}_{int(time.time())}.png"
-                self.driver.save_screenshot(filename)
-                print(f"诊断截图已保存: {filename}")
-        except:
-            pass
+                filepath = os.path.join(self.debug_dir, filename)
+                self.driver.save_screenshot(filepath)
+                print(f"诊断截图已保存: {filepath}")
+        except Exception as e:
+            print(f"保存截图失败: {e}")
 
     def _extract_lovart_code(self) -> Optional[str]:
         """从当前页面提取Lovart验证码"""
@@ -564,18 +572,17 @@ class LovartGUIApp:
         
         # 禁用按钮
         self.set_buttons_state(False)
-        self.log("正在准备自动导入...")
+        self.log("正在准备静默自动导入...")
         
         # 后台线程执行
         def run():
             try:
-                self.log("正在启动Chrome浏览器...")
-                self.fetcher = LovartGUIFetcher()
-                self.fetcher.start(headless=False)
-                self.log("浏览器已启动，等待页面加载...")
-                time.sleep(3)
+                self.log("正在启动后台浏览器...")
+                if not self.fetcher or not self.fetcher.driver:
+                    self.fetcher = LovartGUIFetcher()
+                    self.fetcher.start(headless=True)
                 
-                self.log("正在导入账号...")
+                self.log("浏览器已在后台就绪，正在导入账号...")
                 if self.fetcher.import_account(account_text):
                     self.log("账号导入成功!")
                     self.root.after(0, lambda: messagebox.showinfo("成功", "账号导入成功!"))
@@ -602,7 +609,8 @@ class LovartGUIApp:
             return
         
         # 提取邮箱
-        email = account_text.split('----')[0].strip() if '----' in account_text else account_text
+        is_full_info = '----' in account_text
+        email = account_text.split('----')[0].strip() if is_full_info else account_text
         
         # 禁用按钮
         self.set_buttons_state(False)
@@ -610,17 +618,23 @@ class LovartGUIApp:
         
         def run():
             try:
-                if not self.fetcher or not self.fetcher.driver:
+                # 如果 fetcher 已经在运行且是显式窗口，或者需要启动新的 fetcher
+                # 规则：如果只是输入邮箱，我们使用静默模式 (headless=True)
+                # 如果是完整信息导入，我们也使用静默模式
+                need_start = not self.fetcher or not self.fetcher.driver
+                
+                if need_start:
                     self.fetcher = LovartGUIFetcher()
-                    self.fetcher.start(headless=False)
-                    self.log("浏览器已启动")
-                    
-                    # 如果提供了完整信息，则尝试自动导入
-                    if '----' in account_text:
-                        self.log("检测到完整账号信息，正在自动导入...")
-                        self.fetcher.import_account(account_text)
-                    else:
-                        self.log("未检测到完整信息，假设账号已手动导入")
+                    # 只有手动模式才会设置 headless=False，其他自动操作默认为静默
+                    self.fetcher.start(headless=True)
+                    self.log("浏览器已在后台静默启动")
+                
+                # 如果提供了完整信息，则尝试自动导入
+                if is_full_info:
+                    self.log("检测到完整账号信息，正在自动导入...")
+                    self.fetcher.import_account(account_text)
+                else:
+                    self.log(f"直接查找邮箱: {email}")
                 
                 # 获取验证码
                 code = self.fetcher.get_lovart_code(email)
@@ -704,20 +718,20 @@ class LovartGUIApp:
     
     def manual_mode(self):
         """手动操作模式"""
+        # 如果当前有后台运行的浏览器，先关闭它
+        if self.fetcher and self.fetcher.driver:
+            self.log("正在切换到显式模式，请稍候...")
+            self.fetcher.close()
+            
         self.set_buttons_state(False)
-        self.log("启动手动模式...")
+        self.log("启动手动模式 (可见窗口)...")
         
         def run():
             try:
-                if not self.fetcher or not self.fetcher.driver:
-                    self.fetcher = LovartGUIFetcher()
-                    self.fetcher.start(headless=False)
-                    self.log("浏览器已启动，请在浏览器中手动导入或登录")
-                else:
-                    self.log("浏览器已在运行中")
-                    self.fetcher.driver.maximize_window()
-                
-                self.log("提示：手动导入完成后，直接点击'获取验证码'即可")
+                self.fetcher = LovartGUIFetcher()
+                self.fetcher.start(headless=False)
+                self.log("显式浏览器已启动，请在其中手动操作")
+                self.log("提示：操作完成后，可直接在工具中输入邮箱获取验证码")
             except Exception as e:
                 self.log(f"启动失败: {str(e)}")
             finally:

@@ -63,7 +63,9 @@ class LovartSeleniumFetcher:
         
         options = Options()
         if headless:
-            options.add_argument('--headless')
+            options.add_argument('--headless=new')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--window-size=1920,1080')
         
         # 使用持久化配置目录
         target_dir = user_data_dir if user_data_dir else self.user_data_dir

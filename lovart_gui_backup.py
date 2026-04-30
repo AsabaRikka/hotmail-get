@@ -161,7 +161,6 @@ class LovartGUIFetcher:
         
         self.wait = WebDriverWait(self.driver, 60)
         time.sleep(3)
-        self._main_window_handle = self.driver.current_window_handle
         self.log("浏览器已就绪")
         return self
 
@@ -169,8 +168,9 @@ class LovartGUIFetcher:
         """获取所有已经导入的邮箱账号"""
         accounts = []
         try:
-            self._ensure_main_page()
             self.log("正在解析页面账号列表...")
+            # 等待页面表格加载
+            time.sleep(2)
             
             # 获取所有账号行
             rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
@@ -317,9 +317,12 @@ class LovartGUIFetcher:
         获取指定邮箱的Lovart验证码
         """
         try:
-            self._ensure_main_page()
+            # 等待页面加载
+            time.sleep(3)
+            
+            # 记录当前页面状态
             self.save_screenshot("before_search")
-
+            
             # 查找账号行
             rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
             print(f"找到 {len(rows)} 行账号数据")
@@ -391,17 +394,15 @@ class LovartGUIFetcher:
 
     def get_code_by_keyword(self, keyword: str, email: Optional[str] = None) -> Optional[str]:
         """根据关键字查找最新的验证码
-
+        
         Args:
             keyword: 要查找的关键字 (如 'lovart', 'Trae')
             email: 可选，指定只在某个邮箱账号中查找
-
+        
         Returns:
             最新的验证码
         """
         try:
-            self._ensure_main_page()
-
             # 如果指定了邮箱，先找到该邮箱并点击查看
             if email:
                 self.log(f"正在定位邮箱: {email}")
@@ -468,96 +469,79 @@ class LovartGUIFetcher:
         except Exception as e:
             self.log(f"点击查看按钮失败: {e}")
 
-    def _extract_code_by_keyword(self, keyword: str) -> Optional[str]:
-        """使用收件箱搜索框按关键字找到最新邮件并提取验证码"""
+    def _extract_code_by_keyword(self, keyword: str) -&gt; Optional[str]:
+        """在邮件列表或详情中根据关键字提取最新的验证码"""
         try:
             time.sleep(2)
-
-            # 1. 尝试使用搜索框搜索关键词
-            search_input = None
-            for selector in [
-                "input[placeholder*='搜索']",
-                "input[placeholder*='search']",
-                "input[placeholder*='Search']",
-                "input[type='search']",
-                "input[class*='search']",
-            ]:
+            self.log("正在扫描邮件列表，寻找最新邮件...")
+            
+            # 遍历邮件列表，找到所有包含关键字的
+            email_items = self.driver.find_elements(By.CSS_SELECTOR, "div[class*='cursor-pointer'], tr, li")
+            
+            target_items = []
+            for idx, item in enumerate(email_items):
                 try:
-                    search_input = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    break
+                    text = item.text.lower()
+                    if keyword.lower() in text:
+                        target_items.append(item)
+                        self.log(f"找到匹配邮件 #{idx+1}: {item.text[:80]}...")
                 except:
                     continue
-
-            if search_input:
-                self.log(f"找到搜索框，输入关键词: {keyword}")
-                search_input.clear()
-                search_input.send_keys(keyword)
-                time.sleep(2)
-
-            # 2. 找到邮件列表中第一封（最新）包含关键词的邮件并点击
-            email_items = self.driver.find_elements(
-                By.CSS_SELECTOR,
-                "div[class*='cursor-pointer'], div[class*='email-item'], div[class*='mail-item'], li[class*='mail'], tr[class*='mail']"
-            )
-
-            for item in email_items:
-                try:
-                    if keyword.lower() in item.text.lower():
-                        self.driver.execute_script("arguments[0].scrollIntoView();", item)
-                        self.driver.execute_script("arguments[0].click();", item)
-                        self.log("已点击最新匹配邮件")
-                        time.sleep(3)
-                        break
-                except:
-                    continue
-
-            # 3. 从当前页面（邮件详情）提取6位验证码
-            body_text = self.driver.find_element(By.TAG_NAME, "body").text
-            code_match = re.search(r'\b(\d{6})\b', body_text)
+            
+            if not target_items:
+                self.log("邮件列表中未找到匹配项，尝试扫描全页文本...")
+                # 如果列表没找到，尝试扫描全页文本
+                page_text = self.driver.page_source
+                if keyword.lower() in page_text.lower():
+                    # 直接尝试正则提取，取最后一个（通常是最新的）
+                    matches = re.findall(r'\b(\d{6})\b', page_text)
+                    if matches:
+                        # 返回最后一个，通常是最新的
+                        self.log(f"从全页文本找到验证码: {matches[-1]}")
+                        return matches[-1]
+                return None
+            
+            self.log(f"共找到 {len(target_items)} 个匹配邮件")
+            
+            # 找到目标邮件，点击打开（取最新的在最上面）
+            target_item = target_items[0]
+            self.driver.execute_script("arguments[0].scrollIntoView();", target_item)
+            self.driver.execute_script("arguments[0].click();", target_item)
+            time.sleep(3)
+            
+            # 在详情中提取验证码
+            detail_page = self.driver.page_source
+            # 查找 6 位数字
+            code_match = re.search(r'>(\d{6})<', detail_page)
+            if not code_match:
+                code_match = re.search(r'\b(\d{6})\b', self.driver.find_element(By.TAG_NAME, "body").text)
+            
             if code_match:
-                return code_match.group(1)
-
-            # 4. 兜底：从页面源码提取
-            page_source = self.driver.page_source
-            code_match = re.search(r'>(\d{6})<', page_source)
-            if code_match:
-                return code_match.group(1)
-
+                code = code_match.group(1)
+                self.log(f"从邮件详情中提取到验证码: {code}")
+                return code
+                
         except Exception as e:
             self.log(f"提取验证码失败: {e}")
-
+            # 如果点击第一个失败，尝试直接在列表中直接找验证码
+            try:
+                self.log("尝试直接在邮件列表中提取验证码...")
+                all_text = self.driver.find_element(By.TAG_NAME, "body").text
+                matches = re.findall(r'\b(\d{6})\b', all_text)
+                if matches:
+                    self.log(f"从页面文本找到验证码: {matches[-1]}")
+                    return matches[-1]
+            except:
+                pass
+            
         return None
-
-    def _ensure_main_page(self):
-        """确保当前在主账号列表页"""
-        # 保存主窗口句柄，防止操作过程中打开了新标签页
-        try:
-            current_handles = self.driver.window_handles
-            if hasattr(self, '_main_window_handle') and self._main_window_handle in current_handles:
-                if self.driver.current_window_handle != self._main_window_handle:
-                    self.driver.switch_to.window(self._main_window_handle)
-            else:
-                self._main_window_handle = self.driver.current_window_handle
-        except:
-            pass
-
-        # 始终强制导航回主页，确保关闭所有弹窗/模态框，恢复干净的表格视图
-        self.driver.get("https://app.wyx66.com/")
-        time.sleep(3)
-
-        # 等待表格行加载
-        try:
-            WebDriverWait(self.driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "table tbody tr"))
-            )
-        except:
-            self.log("等待表格加载超时，继续尝试...")
 
     def get_account_by_row(self, row_index: int) -> Optional[str]:
         """根据行号获取邮箱账号 (从1开始)"""
         try:
-            self._ensure_main_page()
-
+            # 等待页面加载
+            time.sleep(2)
+            
             # 获取所有账号行
             rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
             if row_index < 1 or row_index > len(rows):
@@ -705,7 +689,10 @@ class LovartGUIFetcher:
         results = {}
         
         try:
-            self._ensure_main_page()
+            # 等待页面加载
+            time.sleep(2)
+            
+            # 获取所有账号行
             rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
             
             for row in rows:
@@ -1003,15 +990,7 @@ class LovartGUIApp:
                     self.log(f"成功获取 {len(accounts)} 个已导入账号:")
                     for i, email in enumerate(accounts):
                         self.log(f"  {i+1}. {email}")
-                    # 自动复制所有账号到剪贴板
-                    all_accounts = "\n".join(accounts)
-                    self.copy_to_clipboard(all_accounts)
-                    self.log("账号已复制到剪贴板!")
-                    # 同时填充第一个账号到输入框（需要在主线程操作UI）
-                    self.root.after(0, lambda: self.account_entry.delete(0, tk.END))
-                    self.root.after(0, lambda: self.account_entry.insert(0, accounts[0]))
-                    self.log("第一个账号已填充到上方输入框")
-                    self.root.after(0, lambda: messagebox.showinfo("成功", f"成功获取 {len(accounts)} 个已导入账号\n\n(已自动复制到剪贴板)"))
+                    self.root.after(0, lambda: messagebox.showinfo("成功", f"成功获取 {len(accounts)} 个已导入账号"))
                 else:
                     self.log("未找到任何已导入账号")
                     self.root.after(0, lambda: messagebox.showwarning("提醒", "未找到任何已导入账号，请先导入"))
@@ -1044,12 +1023,11 @@ class LovartGUIApp:
                 
                 if email:
                     self.log(f"第 {row_index} 行账号为: {email}")
+                    # 自动填充到账号输入框，方便后续获取验证码
                     self.account_entry.delete(0, tk.END)
                     self.account_entry.insert(0, email)
                     self.log("账号已填充到上方输入框")
-                    self.copy_to_clipboard(email)
-                    self.log("账号已复制到剪贴板!")
-                    self.root.after(0, lambda: messagebox.showinfo("成功", f"成功获取第 {row_index} 行账号:\n{email}\n\n(已自动复制到剪贴板)"))
+                    self.root.after(0, lambda: messagebox.showinfo("成功", f"成功获取第 {row_index} 行账号:\n{email}"))
                 else:
                     self.log(f"未能获取到第 {row_index} 行账号")
                     self.root.after(0, lambda: messagebox.showwarning("失败", f"未能获取到第 {row_index} 行账号，请检查行号是否正确"))

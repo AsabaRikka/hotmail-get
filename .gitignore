@@ -1,0 +1,14 @@
+# Python bytecode
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Selenium / Chrome Profile
+chrome_profile/
+debug_logs/
+*.png
+*.log
+
+# IDE
+.vscode/
+.idea/

@@ -48,52 +48,90 @@ except ImportError:
 class LovartGUIFetcher:
     """GUI版本的Lovart验证码获取器"""
     
-    def __init__(self):
+    def __init__(self, log_func=None):
         self.driver = None
         self.wait = None
         self.running = False
-        # 设置持久化数据目录
-        self.user_data_dir = os.path.join(os.getcwd(), "chrome_profile")
+        self.log_func = log_func
+        # 使用绝对路径确保持久化目录稳定
+        self.user_data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "chrome_profile"))
         if not os.path.exists(self.user_data_dir):
             os.makedirs(self.user_data_dir)
             
         # 设置调试图片目录
-        self.debug_dir = os.path.join(os.getcwd(), "debug_logs")
+        self.debug_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "debug_logs"))
         if not os.path.exists(self.debug_dir):
             os.makedirs(self.debug_dir)
-    
+
+    def log(self, message: str):
+        """记录日志"""
+        if self.log_func:
+            self.log_func(message)
+        print(f"[Fetcher] {message}")
+
+    def _cleanup_lock(self):
+        """清理浏览器锁定文件并尝试结束残留进程"""
+        lock_files = [
+            os.path.join(self.user_data_dir, "SingletonLock"),
+            os.path.join(self.user_data_dir, "Default", "SingletonLock"),
+        ]
+        
+        # 尝试通过命令行结束可能占用该目录的 Chrome 进程
+        try:
+            # 仅在 Windows 下尝试执行
+            if os.name == 'nt':
+                # 寻找并结束所有 chromedriver 和相关的 chrome 进程
+                os.system('taskkill /f /im chromedriver.exe /t >nul 2>&1')
+                # 注意：这里不直接杀掉所有 chrome.exe，以免影响用户正常的浏览器
+                # 但如果启动持续失败，可能需要手动关闭所有 Chrome
+        except:
+            pass
+
+        for f in lock_files:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                    self.log(f"已清理残留的锁定文件: {os.path.basename(f)}")
+                except Exception as e:
+                    self.log(f"警告: 无法清理锁定文件，可能仍被占用: {e}")
+
     def start(self, headless: bool = False):
         """启动浏览器"""
         if not SELENIUM_AVAILABLE:
             raise Exception("Selenium未安装")
         
+        self.log(f"正在配置浏览器 (模式: {'静默' if headless else '显式'})...")
+        self._cleanup_lock()
+        
         options = Options()
         if headless:
-            options.add_argument('--headless=new')  # 使用新的 headless 模式更稳定
+            options.add_argument('--headless=new')
             options.add_argument('--disable-gpu')
-            options.add_argument('--window-size=1920,1080') # headless 模式下设置大分辨率
+            options.add_argument('--window-size=1920,1080')
+        else:
+            options.add_argument('--start-maximized')
         
-        # 使用持久化配置目录
+        # 确保持久化配置目录
         options.add_argument(f'--user-data-dir={self.user_data_dir}')
         options.add_argument('--profile-directory=Default')
         
-        options.add_argument('--disable-blink-features=AutomationControlled')
+        # 核心稳定性参数
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--window-size=1280,720')
-        options.add_argument('--disable-extensions')
-        options.add_argument('--disable-popup-blocking')
-        options.add_argument('--start-maximized')
+        options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_argument('--remote-allow-origins=*')
+        options.add_argument('--ignore-certificate-errors')
+        options.add_argument('--no-first-run')
+        options.add_argument('--no-default-browser-check')
         
-        # 增加防检测参数
+        # 移除实验性参数，有时会导致崩溃
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
-        options.add_argument('--disable-blink-features=AutomationControlled')
         
         try:
+            self.log("正在启动 Chrome (如果长时间没反应，请关闭所有已打开的 Chrome 浏览器)...")
             service = Service(ChromeDriverManager().install())
+            # 设置启动超时
             self.driver = webdriver.Chrome(service=service, options=options)
             
             # 移除 webdriver 特征
@@ -105,16 +143,75 @@ class LovartGUIFetcher:
                 """
             })
         except Exception as e:
-            print(f"使用webdriver-manager启动失败，尝试普通启动: {e}")
-            self.driver = webdriver.Chrome(options=options)
+            err_str = str(e)
+            if "session not created" in err_str or "crashed" in err_str:
+                self.log("启动崩溃！检测到可能的环境冲突。")
+                self.log(">>> 解决方案：请保存好您的工作，手动关闭所有已打开的 Chrome 浏览器窗口，然后重试。")
+            raise Exception(f"浏览器启动失败: {err_str}")
             
         self.driver.set_page_load_timeout(60)
         self.driver.set_script_timeout(60)
-        self.driver.get("https://app.wyx66.com/")
+        
+        self.log("正在打开目标网页...")
+        try:
+            self.driver.get("https://app.wyx66.com/")
+            self.log("网页已打开，正在初始化...")
+        except:
+            self.log("网页打开缓慢，正在继续...")
         
         self.wait = WebDriverWait(self.driver, 60)
-        time.sleep(5)
+        time.sleep(3)
+        self.log("浏览器已就绪")
         return self
+
+    def get_imported_accounts(self) -> List[str]:
+        """获取所有已经导入的邮箱账号"""
+        accounts = []
+        try:
+            self.log("正在解析页面账号列表...")
+            # 等待页面表格加载
+            time.sleep(2)
+            
+            # 获取所有账号行
+            rows = self.driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+            self.log(f"找到 {len(rows)} 行数据")
+            
+            for i, row in enumerate(rows):
+                try:
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if not cells:
+                        continue
+                        
+                    # 打印整行文本用于调试
+                    row_text = row.text.strip()
+                    
+                    # 尝试从单元格中寻找邮箱
+                    email = ""
+                    for cell in cells:
+                        cell_text = cell.text.strip()
+                        if "@" in cell_text:
+                            # 进一步过滤，确保是类似邮箱的格式
+                            if "." in cell_text and len(cell_text) > 5:
+                                email = cell_text
+                                break
+                    
+                    if email:
+                        accounts.append(email)
+                        # self.log(f"解析到账号: {email}") # 可选：开启详细日志
+                    else:
+                        # 如果单元格没找到，尝试从行文本中通过正则提取
+                        match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', row_text)
+                        if match:
+                            email = match.group(0)
+                            accounts.append(email)
+                            
+                except Exception as e:
+                    self.log(f"解析第 {i+1} 行失败: {e}")
+            
+        except Exception as e:
+            self.log(f"获取账号失败: {e}")
+            
+        return accounts
     
     def close(self):
         """关闭浏览器"""
@@ -509,12 +606,17 @@ class LovartGUIApp:
         self.manual_btn.pack(side=tk.LEFT, padx=5)
         
         self.get_code_btn = tk.Button(button_frame, text="获取验证码", command=self.get_code,
-                                     font=("微软雅黑", 12), width=12, bg="#2196F3", fg="white",
+                                     font=("微软雅黑", 12), width=10, bg="#2196F3", fg="white",
                                      activebackground="#1976D2", pady=8)
         self.get_code_btn.pack(side=tk.LEFT, padx=5)
+
+        self.get_accounts_btn = tk.Button(button_frame, text="获取已导入账号", command=self.get_imported_accounts,
+                                         font=("微软雅黑", 12), width=14, bg="#607D8B", fg="white",
+                                         activebackground="#455A64", pady=8)
+        self.get_accounts_btn.pack(side=tk.LEFT, padx=5)
         
         self.get_all_btn = tk.Button(button_frame, text="获取全部", command=self.get_all_codes,
-                                    font=("微软雅黑", 12), width=14, bg="#FF9800", fg="white",
+                                    font=("微软雅黑", 12), width=10, bg="#FF9800", fg="white",
                                     activebackground="#F57C00", pady=8)
         self.get_all_btn.pack(side=tk.LEFT, padx=5)
         
@@ -572,17 +674,15 @@ class LovartGUIApp:
         
         # 禁用按钮
         self.set_buttons_state(False)
-        self.log("正在准备静默自动导入...")
         
         # 后台线程执行
         def run():
             try:
-                self.log("正在启动后台浏览器...")
                 if not self.fetcher or not self.fetcher.driver:
-                    self.fetcher = LovartGUIFetcher()
+                    self.fetcher = LovartGUIFetcher(log_func=self.log)
                     self.fetcher.start(headless=True)
                 
-                self.log("浏览器已在后台就绪，正在导入账号...")
+                self.log("正在导入账号...")
                 if self.fetcher.import_account(account_text):
                     self.log("账号导入成功!")
                     self.root.after(0, lambda: messagebox.showinfo("成功", "账号导入成功!"))
@@ -614,41 +714,35 @@ class LovartGUIApp:
         
         # 禁用按钮
         self.set_buttons_state(False)
-        self.log(f"正在查找 {email} 的验证码...")
+        self.log(f"正在准备获取 {email} 的验证码...")
         
         def run():
             try:
-                # 如果 fetcher 已经在运行且是显式窗口，或者需要启动新的 fetcher
-                # 规则：如果只是输入邮箱，我们使用静默模式 (headless=True)
-                # 如果是完整信息导入，我们也使用静默模式
                 need_start = not self.fetcher or not self.fetcher.driver
                 
                 if need_start:
-                    self.fetcher = LovartGUIFetcher()
-                    # 只有手动模式才会设置 headless=False，其他自动操作默认为静默
+                    self.fetcher = LovartGUIFetcher(log_func=self.log)
                     self.fetcher.start(headless=True)
-                    self.log("浏览器已在后台静默启动")
                 
                 # 如果提供了完整信息，则尝试自动导入
                 if is_full_info:
                     self.log("检测到完整账号信息，正在自动导入...")
                     self.fetcher.import_account(account_text)
-                else:
-                    self.log(f"直接查找邮箱: {email}")
                 
                 # 获取验证码
+                self.log(f"正在查找邮箱: {email}")
                 code = self.fetcher.get_lovart_code(email)
                 
                 if code:
                     self.code_entry.delete(0, tk.END)
                     self.code_entry.insert(0, code)
-                    self.log(f"找到验证码: {code}")
+                    self.log(f"成功找到验证码: {code}")
                     
                     # 自动复制
                     self.copy_to_clipboard(code)
                     self.log("验证码已复制到剪贴板!")
                 else:
-                    self.log("未找到验证码，请确保账号有Lovart邮件")
+                    self.log("未找到验证码，请确保账号有相关邮件")
                     messagebox.showwarning("警告", "未找到验证码")
             
             except Exception as e:
@@ -660,31 +754,57 @@ class LovartGUIApp:
         
         threading.Thread(target=run, daemon=True).start()
     
-    def get_all_codes(self):
-        """获取所有账号的验证码"""
+    def get_imported_accounts(self):
+        """获取所有已经导入的邮箱账号"""
         self.set_buttons_state(False)
-        self.log("正在准备批量获取...")
+        self.log("开始获取已导入账号任务...")
         
         def run():
             try:
                 if not self.fetcher or not self.fetcher.driver:
-                    self.fetcher = LovartGUIFetcher()
+                    self.log("正在启动浏览器...")
+                    self.fetcher = LovartGUIFetcher(log_func=self.log)
                     self.fetcher.start(headless=False)
-                    self.log("浏览器已启动")
                 
-                self.log("正在从页面读取邮箱列表...")
-                # 这里假设用户已经导入了账号
-                # 调用 fetcher 的方法获取所有验证码
+                accounts = self.fetcher.get_imported_accounts()
+                
+                if accounts:
+                    self.log(f"成功获取 {len(accounts)} 个已导入账号:")
+                    for i, email in enumerate(accounts):
+                        self.log(f"  {i+1}. {email}")
+                    self.root.after(0, lambda: messagebox.showinfo("成功", f"成功获取 {len(accounts)} 个已导入账号"))
+                else:
+                    self.log("未找到任何已导入账号")
+                    self.root.after(0, lambda: messagebox.showwarning("提醒", "未找到任何已导入账号，请先导入"))
+            except Exception as e:
+                self.log(f"获取账号列表失败: {str(e)}")
+                self.root.after(0, lambda: messagebox.showerror("错误", f"获取失败: {str(e)}"))
+            finally:
+                self.root.after(0, lambda: self.set_buttons_state(True))
+        
+        threading.Thread(target=run, daemon=True).start()
+
+    def get_all_codes(self):
+        """获取所有账号的验证码"""
+        self.set_buttons_state(False)
+        self.log("正在准备批量获取验证码...")
+        
+        def run():
+            try:
+                if not self.fetcher or not self.fetcher.driver:
+                    self.fetcher = LovartGUIFetcher(log_func=self.log)
+                    self.fetcher.start(headless=False)
+                
+                self.log("正在批量处理所有账号...")
                 codes = self.fetcher.get_all_lovart_codes()
                 
                 if codes:
-                    self.log(f"成功获取 {len(codes)} 个验证码")
-                    # 在日志中显示
+                    self.log(f"批量获取完成，共 {len(codes)} 个结果")
                     for email, code in codes.items():
-                        self.log(f"[{email}] -> {code}")
-                    self.root.after(0, lambda: messagebox.showinfo("成功", f"批量获取完成，共 {len(codes)} 个"))
+                        self.log(f"  [{email}] -> {code if code else '未找到'}")
+                    self.root.after(0, lambda: messagebox.showinfo("成功", f"批量获取完成，共 {len(codes)} 个结果"))
                 else:
-                    self.log("未找到任何验证码，请确保账号已登录并有邮件")
+                    self.log("未找到任何结果")
             except Exception as e:
                 self.log(f"批量获取失败: {str(e)}")
             finally:
@@ -708,30 +828,25 @@ class LovartGUIApp:
             if CLIPBOARD_AVAILABLE:
                 pyperclip.copy(text)
             else:
-                # 备用方法
                 self.root.clipboard_clear()
                 self.root.clipboard_append(text)
         except:
-            # 备用方法
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
     
     def manual_mode(self):
         """手动操作模式"""
-        # 如果当前有后台运行的浏览器，先关闭它
         if self.fetcher and self.fetcher.driver:
-            self.log("正在切换到显式模式，请稍候...")
+            self.log("正在切换模式，请稍候...")
             self.fetcher.close()
             
         self.set_buttons_state(False)
-        self.log("启动手动模式 (可见窗口)...")
         
         def run():
             try:
-                self.fetcher = LovartGUIFetcher()
+                self.fetcher = LovartGUIFetcher(log_func=self.log)
                 self.fetcher.start(headless=False)
                 self.log("显式浏览器已启动，请在其中手动操作")
-                self.log("提示：操作完成后，可直接在工具中输入邮箱获取验证码")
             except Exception as e:
                 self.log(f"启动失败: {str(e)}")
             finally:
@@ -743,8 +858,11 @@ class LovartGUIApp:
         """设置按钮状态"""
         state = tk.NORMAL if enabled else tk.DISABLED
         self.import_btn.config(state=state)
+        self.manual_btn.config(state=state)
         self.get_code_btn.config(state=state)
+        self.get_accounts_btn.config(state=state)
         self.get_all_btn.config(state=state)
+        self.root.update()
 
 
 def main():

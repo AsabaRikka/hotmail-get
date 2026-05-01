@@ -18,12 +18,28 @@ import threading
 import time
 import re
 import os
+import sys
 import shutil
 import json
 from typing import Optional, List, Dict
 from datetime import datetime
 
+# 跨平台字体设置
+if sys.platform == "darwin":
+    UI_FONT = "PingFang SC"
+    UI_FONT_BOLD = ("PingFang SC", "bold")
+    MONO_FONT = "SF Mono"
+elif sys.platform == "win32":
+    UI_FONT = "微软雅黑"
+    UI_FONT_BOLD = ("微软雅黑", "bold")
+    MONO_FONT = "Consolas"
+else:
+    UI_FONT = "sans-serif"
+    UI_FONT_BOLD = ("sans-serif", "bold")
+    MONO_FONT = "monospace"
+
 # 尝试导入Selenium
+SELENIUM_MISSING = []
 try:
     from selenium import webdriver
     from selenium.webdriver.common.by import By
@@ -31,11 +47,21 @@ try:
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
-    from webdriver_manager.chrome import ChromeDriverManager
     from selenium.common.exceptions import TimeoutException, NoSuchElementException
     SELENIUM_AVAILABLE = True
 except ImportError:
     SELENIUM_AVAILABLE = False
+    SELENIUM_MISSING.append("selenium")
+
+if SELENIUM_AVAILABLE:
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        WEBDRIVER_MANAGER_AVAILABLE = True
+    except ImportError:
+        WEBDRIVER_MANAGER_AVAILABLE = False
+        SELENIUM_MISSING.append("webdriver-manager")
+else:
+    WEBDRIVER_MANAGER_AVAILABLE = False
 
 # 尝试导入剪贴板
 try:
@@ -53,11 +79,13 @@ class LovartGUIFetcher:
         self.wait = None
         self.running = False
         self.log_func = log_func
+        self._lock = threading.Lock()
+        self._headless = False
         # 使用绝对路径确保持久化目录稳定
         self.user_data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "chrome_profile"))
         if not os.path.exists(self.user_data_dir):
             os.makedirs(self.user_data_dir)
-            
+
         # 设置调试图片目录
         self.debug_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "debug_logs"))
         if not os.path.exists(self.debug_dir):
@@ -95,11 +123,24 @@ class LovartGUIFetcher:
                 except Exception as e:
                     self.log(f"警告: 无法清理锁定文件，可能仍被占用: {e}")
 
+    def _is_session_alive(self) -> bool:
+        """检查浏览器会话是否仍然有效"""
+        if not self.driver:
+            return False
+        try:
+            self.driver.execute_script("return true;")
+            return True
+        except:
+            return False
+
     def start(self, headless: bool = False):
         """启动浏览器"""
         if not SELENIUM_AVAILABLE:
-            raise Exception("Selenium未安装")
-        
+            raise Exception("Selenium未安装，请运行: pip install selenium")
+        if not WEBDRIVER_MANAGER_AVAILABLE:
+            raise Exception("webdriver-manager未安装，请运行: pip install webdriver-manager")
+
+        self._headless = headless
         self.log(f"正在配置浏览器 (模式: {'静默' if headless else '显式'})...")
         self._cleanup_lock()
         
@@ -530,6 +571,9 @@ class LovartGUIFetcher:
 
     def _ensure_main_page(self):
         """确保当前在主账号列表页"""
+        if not self._is_session_alive():
+            raise Exception("浏览器会话已失效，请重新启动浏览器")
+
         # 保存主窗口句柄，防止操作过程中打开了新标签页
         try:
             current_handles = self.driver.window_handles
@@ -542,7 +586,11 @@ class LovartGUIFetcher:
             pass
 
         # 始终强制导航回主页，确保关闭所有弹窗/模态框，恢复干净的表格视图
-        self.driver.get("https://app.wyx66.com/")
+        try:
+            self.driver.get("https://app.wyx66.com/")
+        except Exception as e:
+            raise Exception(f"无法导航到目标网页（浏览器会话可能已失效）: {e}")
+
         time.sleep(3)
 
         # 等待表格行加载
@@ -755,132 +803,159 @@ class LovartGUIApp:
         self.root.title("Lovart验证码获取工具")
         self.root.geometry("750x600")
         self.root.resizable(False, False)
-        
+
         self.fetcher = None
         self.running = False
-        
+        self._driver_lock = threading.Lock()
+
+        # macOS 按钮颜色兼容: 使用 ttk + clam 主题
+        if sys.platform == "darwin":
+            self._btn_styles = ttk.Style()
+            self._btn_styles.theme_use('clam')
+            self._btn_style_count = 0
+
         self.setup_ui()
-    
+
+    def _colored_btn(self, parent, text, command, font, bg, fg="white", active_bg=None, **kwargs):
+        """创建跨平台彩色按钮。macOS 用 ttk+clam 主题, Windows 用原生 tk.Button"""
+        if active_bg is None:
+            active_bg = bg
+        kwargs.pop('pady', None)
+
+        if sys.platform == "darwin":
+            self._btn_style_count += 1
+            name = f"Btn{self._btn_style_count}.TButton"
+            self._btn_styles.configure(name, background=bg, foreground=fg,
+                                       font=font, borderwidth=0, relief='flat')
+            self._btn_styles.map(name,
+                background=[('active', active_bg), ('pressed', active_bg)],
+                foreground=[('active', fg)])
+            btn = ttk.Button(parent, text=text, style=name, command=command)
+            if 'width' in kwargs:
+                btn.configure(width=kwargs['width'])
+            return btn
+        else:
+            return tk.Button(parent, text=text, command=command, font=font,
+                             bg=bg, fg=fg, activebackground=active_bg, **kwargs)
+
     def setup_ui(self):
         """设置UI"""
         # 标题
-        title_label = tk.Label(self.root, text="Lovart验证码自动获取工具", 
-                             font=("微软雅黑", 20, "bold"))
+        title_label = tk.Label(self.root, text="Lovart验证码自动获取工具",
+                             font=(UI_FONT, 20, "bold"))
         title_label.pack(pady=15)
-        
+
         # 账号输入框
         input_frame = tk.Frame(self.root)
         input_frame.pack(pady=10, padx=30, fill=tk.X)
-        
-        tk.Label(input_frame, text="账号信息 (格式: email----password----client_id----refresh_token):", 
-                font=("微软雅黑", 11)).pack(anchor=tk.W)
-        
-        self.account_entry = tk.Entry(input_frame, font=("Consolas", 11), width=70)
+
+        tk.Label(input_frame, text="账号信息 (格式: email----password----client_id----refresh_token):",
+                font=(UI_FONT, 11)).pack(anchor=tk.W)
+
+        self.account_entry = tk.Entry(input_frame, font=(MONO_FONT, 11), width=70)
         self.account_entry.pack(pady=5, fill=tk.X)
-        
+
         # 快捷输入按钮
         quick_frame = tk.Frame(self.root)
         quick_frame.pack(pady=5)
-        
+
         # 浏览器模式开关
         self.headless_var = tk.BooleanVar(value=True) # 默认开启静默模式
-        self.headless_check = tk.Checkbutton(quick_frame, text="静默运行浏览器 (不显示窗口)", 
-                                           variable=self.headless_var, font=("微软雅黑", 10))
+        self.headless_check = tk.Checkbutton(quick_frame, text="静默运行浏览器 (不显示窗口)",
+                                           variable=self.headless_var, font=(UI_FONT, 10))
         self.headless_check.pack(side=tk.LEFT, padx=10)
 
-        tk.Label(quick_frame, text="快捷输入:", font=("微软雅黑", 10)).pack(side=tk.LEFT, padx=(20, 5))
-        
+        tk.Label(quick_frame, text="快捷输入:", font=(UI_FONT, 10)).pack(side=tk.LEFT, padx=(20, 5))
+
         quick_btn = tk.Button(quick_frame, text="粘贴示例账号", command=self.paste_sample,
-                             font=("微软雅黑", 9), width=15)
+                             font=(UI_FONT, 9), width=15)
         quick_btn.pack(side=tk.LEFT, padx=5)
-        
+
         # 按钮区域
         button_frame = tk.Frame(self.root)
         button_frame.pack(pady=15)
-        
-        self.import_btn = tk.Button(button_frame, text="自动导入", command=self.import_account,
-                                   font=("微软雅黑", 12), width=12, bg="#4CAF50", fg="white",
-                                   activebackground="#45a049", pady=8)
+
+        self.import_btn = self._colored_btn(button_frame, "自动导入", self.import_account,
+                                           (UI_FONT, 12), "#4CAF50", active_bg="#45a049",
+                                           width=12, pady=8)
         self.import_btn.pack(side=tk.LEFT, padx=5)
 
-        self.manual_btn = tk.Button(button_frame, text="手动模式", command=self.manual_mode,
-                                   font=("微软雅黑", 12), width=12, bg="#9C27B0", fg="white",
-                                   activebackground="#7B1FA2", pady=8)
+        self.manual_btn = self._colored_btn(button_frame, "手动模式", self.manual_mode,
+                                           (UI_FONT, 12), "#9C27B0", active_bg="#7B1FA2",
+                                           width=12, pady=8)
         self.manual_btn.pack(side=tk.LEFT, padx=5)
-        
-        self.get_code_btn = tk.Button(button_frame, text="获取验证码", command=self.get_code,
-                                     font=("微软雅黑", 12), width=10, bg="#2196F3", fg="white",
-                                     activebackground="#1976D2", pady=8)
+
+        self.get_code_btn = self._colored_btn(button_frame, "获取验证码", self.get_code,
+                                             (UI_FONT, 12), "#2196F3", active_bg="#1976D2",
+                                             width=10, pady=8)
         self.get_code_btn.pack(side=tk.LEFT, padx=5)
 
-        self.get_accounts_btn = tk.Button(button_frame, text="获取已导入账号", command=self.get_imported_accounts,
-                                         font=("微软雅黑", 12), width=14, bg="#607D8B", fg="white",
-                                         activebackground="#455A64", pady=8)
+        self.get_accounts_btn = self._colored_btn(button_frame, "获取已导入账号", self.get_imported_accounts,
+                                                 (UI_FONT, 12), "#607D8B", active_bg="#455A64",
+                                                 width=14, pady=8)
         self.get_accounts_btn.pack(side=tk.LEFT, padx=5)
-        
-        self.get_all_btn = tk.Button(button_frame, text="获取全部", command=self.get_all_codes,
-                                    font=("微软雅黑", 12), width=10, bg="#FF9800", fg="white",
-                                    activebackground="#F57C00", pady=8)
+
+        self.get_all_btn = self._colored_btn(button_frame, "获取全部", self.get_all_codes,
+                                            (UI_FONT, 12), "#FF9800", active_bg="#F57C00",
+                                            width=10, pady=8)
         self.get_all_btn.pack(side=tk.LEFT, padx=5)
 
         # 行号查询区域
         row_query_frame = tk.Frame(self.root, bg="#f5f5f5")
         row_query_frame.pack(fill=tk.X, pady=5, padx=30)
-        
-        tk.Label(row_query_frame, text="输入行号查询:", font=("微软雅黑", 10), bg="#f5f5f5").pack(side=tk.LEFT, padx=(10, 5))
-        self.row_entry = tk.Entry(row_query_frame, font=("微软雅黑", 10), width=8)
+
+        tk.Label(row_query_frame, text="输入行号查询:", font=(UI_FONT, 10), bg="#f5f5f5").pack(side=tk.LEFT, padx=(10, 5))
+        self.row_entry = tk.Entry(row_query_frame, font=(UI_FONT, 10), width=8)
         self.row_entry.pack(side=tk.LEFT, padx=5)
         self.row_entry.insert(0, "1") # 默认第1行
 
-        self.get_row_btn = tk.Button(row_query_frame, text="按行号获取账号", command=self.get_account_by_row_action,
-                                    font=("微软雅黑", 10), bg="#673AB7", fg="white",
-                                    activebackground="#512DA8")
+        self.get_row_btn = self._colored_btn(row_query_frame, "按行号获取账号", self.get_account_by_row_action,
+                                            (UI_FONT, 10), "#673AB7", active_bg="#512DA8")
         self.get_row_btn.pack(side=tk.LEFT, padx=10)
 
         # 关键字查询区域
         keyword_query_frame = tk.Frame(self.root, bg="#f5f5f5")
         keyword_query_frame.pack(fill=tk.X, pady=5, padx=30)
-        
-        tk.Label(keyword_query_frame, text="关键字查询验证码:", font=("微软雅黑", 10), bg="#f5f5f5").pack(side=tk.LEFT, padx=(10, 5))
-        self.keyword_entry = tk.Entry(keyword_query_frame, font=("微软雅黑", 10), width=15)
+
+        tk.Label(keyword_query_frame, text="关键字查询验证码:", font=(UI_FONT, 10), bg="#f5f5f5").pack(side=tk.LEFT, padx=(10, 5))
+        self.keyword_entry = tk.Entry(keyword_query_frame, font=(UI_FONT, 10), width=15)
         self.keyword_entry.pack(side=tk.LEFT, padx=5)
         self.keyword_entry.insert(0, "lovart") # 默认关键字
 
-        self.get_keyword_btn = tk.Button(keyword_query_frame, text="根据关键字查找", command=self.get_code_by_keyword_action,
-                                        font=("微软雅黑", 10), bg="#009688", fg="white",
-                                        activebackground="#00796B")
+        self.get_keyword_btn = self._colored_btn(keyword_query_frame, "根据关键字查找", self.get_code_by_keyword_action,
+                                                (UI_FONT, 10), "#009688", active_bg="#00796B")
         self.get_keyword_btn.pack(side=tk.LEFT, padx=10)
-        
+
         # 状态显示
         status_frame = tk.Frame(self.root)
         status_frame.pack(pady=5, padx=30, fill=tk.BOTH, expand=True)
-        
-        tk.Label(status_frame, text="运行日志:", font=("微软雅黑", 11)).pack(anchor=tk.W)
-        
-        self.status_text = scrolledtext.ScrolledText(status_frame, height=10, font=("Consolas", 10))
+
+        tk.Label(status_frame, text="运行日志:", font=(UI_FONT, 11)).pack(anchor=tk.W)
+
+        self.status_text = scrolledtext.ScrolledText(status_frame, height=10, font=(MONO_FONT, 10))
         self.status_text.pack(pady=5, fill=tk.BOTH, expand=True)
-        
+
         # 验证码显示
         result_frame = tk.Frame(self.root)
         result_frame.pack(pady=10, padx=30, fill=tk.X)
-        
-        tk.Label(result_frame, text="最新验证码:", font=("微软雅黑", 12)).pack(anchor=tk.W)
-        
-        self.code_entry = tk.Entry(result_frame, font=("Consolas", 24, "bold"), justify=tk.CENTER)
+
+        tk.Label(result_frame, text="最新验证码:", font=(UI_FONT, 12)).pack(anchor=tk.W)
+
+        self.code_entry = tk.Entry(result_frame, font=(MONO_FONT, 24, "bold"), justify=tk.CENTER)
         self.code_entry.pack(pady=8, fill=tk.X)
-        
+
         # 复制按钮
         copy_frame = tk.Frame(self.root)
         copy_frame.pack(pady=5)
-        
-        copy_btn = tk.Button(copy_frame, text="复制到剪贴板", command=self.copy_code,
-                            font=("微软雅黑", 12), width=18, bg="#673AB7", fg="white",
-                            activebackground="#512DA8", pady=5)
+
+        copy_btn = self._colored_btn(copy_frame, "复制到剪贴板", self.copy_code,
+                                    (UI_FONT, 12), "#673AB7", active_bg="#512DA8",
+                                    width=18, pady=5)
         copy_btn.pack()
         
         # 底部信息
         footer_label = tk.Label(self.root, text="手动模式: 打开浏览器后您可以手动导入或登录\n获取验证码: 只输入邮箱(如 test@outlook.com) 即可在已导入列表中查找", 
-                              font=("微软雅黑", 9), fg="gray", justify=tk.LEFT)
+                              font=(UI_FONT, 9), fg="gray", justify=tk.LEFT)
         footer_label.pack(pady=8)
     
     def paste_sample(self):
@@ -894,6 +969,22 @@ class LovartGUIApp:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.status_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.status_text.see(tk.END)
+
+    def _ensure_driver_ready(self) -> LovartGUIFetcher:
+        """确保浏览器驱动就绪，会话失效时自动重启"""
+        with self._driver_lock:
+            if not self.fetcher or not self.fetcher.driver:
+                self.log("正在启动浏览器...")
+                self.fetcher = LovartGUIFetcher(log_func=self.log)
+                self.fetcher.start(headless=self.headless_var.get())
+            elif not self.fetcher._is_session_alive():
+                self.log("检测到浏览器会话已失效，正在重新启动...")
+                was_headless = self.fetcher._headless
+                self.fetcher.close()
+                time.sleep(1)
+                self.fetcher = LovartGUIFetcher(log_func=self.log)
+                self.fetcher.start(headless=was_headless)
+        return self.fetcher
     
     def import_account(self):
         """导入账号"""
@@ -909,10 +1000,8 @@ class LovartGUIApp:
         # 后台线程执行
         def run():
             try:
-                if not self.fetcher or not self.fetcher.driver:
-                    self.fetcher = LovartGUIFetcher(log_func=self.log)
-                    self.fetcher.start(headless=self.headless_var.get())
-                
+                self._ensure_driver_ready()
+
                 self.log("正在导入账号...")
                 if self.fetcher.import_account(account_text):
                     self.log("账号导入成功!")
@@ -949,12 +1038,8 @@ class LovartGUIApp:
         
         def run():
             try:
-                need_start = not self.fetcher or not self.fetcher.driver
-                
-                if need_start:
-                    self.fetcher = LovartGUIFetcher(log_func=self.log)
-                    self.fetcher.start(headless=self.headless_var.get())
-                
+                self._ensure_driver_ready()
+
                 # 如果提供了完整信息，则尝试自动导入
                 if is_full_info:
                     self.log("检测到完整账号信息，正在自动导入...")
@@ -992,11 +1077,8 @@ class LovartGUIApp:
         
         def run():
             try:
-                if not self.fetcher or not self.fetcher.driver:
-                    self.log("正在启动浏览器...")
-                    self.fetcher = LovartGUIFetcher(log_func=self.log)
-                    self.fetcher.start(headless=self.headless_var.get())
-                
+                self._ensure_driver_ready()
+
                 accounts = self.fetcher.get_imported_accounts()
                 
                 if accounts:
@@ -1036,10 +1118,8 @@ class LovartGUIApp:
         
         def run():
             try:
-                if not self.fetcher or not self.fetcher.driver:
-                    self.fetcher = LovartGUIFetcher(log_func=self.log)
-                    self.fetcher.start(headless=self.headless_var.get())
-                
+                self._ensure_driver_ready()
+
                 email = self.fetcher.get_account_by_row(row_index)
                 
                 if email:
@@ -1072,10 +1152,8 @@ class LovartGUIApp:
         
         def run():
             try:
-                if not self.fetcher or not self.fetcher.driver:
-                    self.fetcher = LovartGUIFetcher(log_func=self.log)
-                    self.fetcher.start(headless=self.headless_var.get())
-                
+                self._ensure_driver_ready()
+
                 # 检查是否在账号输入框中指定了邮箱
                 account_text = self.account_entry.get().strip()
                 email = None
@@ -1110,10 +1188,8 @@ class LovartGUIApp:
         
         def run():
             try:
-                if not self.fetcher or not self.fetcher.driver:
-                    self.fetcher = LovartGUIFetcher(log_func=self.log)
-                    self.fetcher.start(headless=self.headless_var.get())
-                
+                self._ensure_driver_ready()
+
                 self.log("正在批量处理所有账号...")
                 codes = self.fetcher.get_all_lovart_codes()
                 
